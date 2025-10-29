@@ -77,7 +77,9 @@ class FullRunServiceFactory:
         http_gateway = HttpGateway(
             ssl_ctx=ssl_ctx,
             timeout=http_connection_timeout,
-            logger=DebugOnlyLoggerDecorator(self._logger) if config['http_logging'] else None
+            logger=DebugOnlyLoggerDecorator(self._logger) if config['http_logging'] else None,
+            proxy_url=config.get('proxy_url'),
+            use_proxy=config.get('use_proxy', False)
         )
         atexit.register(http_gateway.cleanup)
         safe_file_fetcher = SafeFileFetcher(config, system_file_system, self._logger, http_gateway, waiter)

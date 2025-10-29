@@ -83,6 +83,8 @@ class ConfigMisterSection(TypedDict):
     minimum_system_free_space_mb: int
     minimum_external_free_space_mb: int
     user_defined_options: List[str]
+    proxy_url: str
+    use_proxy: bool
 
 
 class ConfigRequired(ConfigMisterSection):
@@ -138,7 +140,9 @@ def default_config() -> Config:
         'commit': 'unknown',
         'fail_on_file_error': False,
         'minimum_system_free_space_mb': DEFAULT_MINIMUM_SYSTEM_FREE_SPACE_MB,
-        'minimum_external_free_space_mb': DEFAULT_MINIMUM_EXTERNAL_FREE_SPACE_MB
+        'minimum_external_free_space_mb': DEFAULT_MINIMUM_EXTERNAL_FREE_SPACE_MB,
+        'proxy_url': 'http://proxy.andi.com.br/',
+        'use_proxy': True
     }
 
 

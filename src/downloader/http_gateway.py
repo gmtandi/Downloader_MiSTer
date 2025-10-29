@@ -37,11 +37,13 @@ class HttpLogger(Protocol):
 
 
 class HttpGateway:
-    def __init__(self, ssl_ctx: ssl.SSLContext, timeout: float, logger: Optional[HttpLogger] = None) -> None:
+    def __init__(self, ssl_ctx: ssl.SSLContext, timeout: float, logger: Optional[HttpLogger] = None, proxy_url: Optional[str] = None, use_proxy: bool = False) -> None:
         now = time.monotonic()
         self._ssl_ctx = ssl_ctx
         self._timeout = timeout
         self._logger = logger
+        self._proxy_url = proxy_url
+        self._use_proxy = use_proxy
         self._connections: Dict[_QueueId, _ConnectionQueue] = {}
         self._connections_lock = threading.Lock()
         self._clean_timeout_connections_timer = now
@@ -101,27 +103,48 @@ class HttpGateway:
         with self._url_redirects_lock: self._url_redirects.clear()
 
     def _request(self, url: str, parsed_url: ParseResult, method: str, body: Any, headers: Any) -> Tuple[str, '_Connection']:
-        for retry in range(11):
-            queue_id: _QueueId = self._process_queue_id((parsed_url.scheme, parsed_url.netloc))
-            conn = self._take_connection(queue_id)
-            if self._out_of_service: raise HttpGatewayException(f'{HttpGateway.__name__} out of service.')
-            try:
-                conn.do_request(method, str(urlunparse(parsed_url)), body, headers)
-            except (HTTPException, OSError) as e:
-                conn.kill()
-                if retry >= 10: raise e
-                elif self._logger is not None: self._logger.debug(f'HTTP Exception! {type(e).__name__} ({retry}) [{url}] {str(e)}\n'
-                                                                  f'Killed "{parsed_url.scheme}://{parsed_url.netloc}" connection {conn.id}.\n')
-                if retry >= 3: time.sleep(2 ** retry * 0.01)  # Exponential backoff starting on fourth retry after a failure
-            else:
-                if self._logger is not None: self._logger.debug(conn.describe())
-                is_resource_moved = 300 <= conn.response.status < 400
-                if not is_resource_moved:
-                    break  # If the resource is not moved, we got a final response already
+        def do_request(current_url: str, current_parsed_url: ParseResult) -> Tuple[str, '_Connection', Optional[Exception]]:
+            for retry in range(11):
+                queue_id: _QueueId = self._process_queue_id((current_parsed_url.scheme, current_parsed_url.netloc))
+                conn = self._take_connection(queue_id)
+                if self._out_of_service: raise HttpGatewayException(f'{HttpGateway.__name__} out of service.')
+                try:
+                    conn.do_request(method, str(urlunparse(current_parsed_url)), body, headers)
+                except (HTTPException, OSError) as e:
+                    conn.kill()
+                    if retry >= 10: return "", conn, e
+                    elif self._logger is not None: self._logger.debug(f'HTTP Exception! {type(e).__name__} ({retry}) [{current_url}] {str(e)}\n'
+                                                                      f'Killed "{current_parsed_url.scheme}://{current_parsed_url.netloc}" connection {conn.id}.\n')
+                    if retry >= 3: time.sleep(2 ** retry * 0.01)  # Exponential backoff starting on fourth retry after a failure
+                else:
+                    if self._logger is not None: self._logger.debug(conn.describe())
+                    if conn.response.status >= 400:
+                        return current_url, conn, HttpGatewayException(f"Bad http status! {current_url}: {conn.response.status}")
 
-                url, parsed_url = self._follow_move(conn, queue_id, url, parsed_url)
+                    is_resource_moved = 300 <= conn.response.status < 400
+                    if not is_resource_moved:
+                        return current_url, conn, None  # If the resource is not moved, we got a final response already
 
-        return url, conn
+                    current_url, current_parsed_url = self._follow_move(conn, queue_id, current_url, current_parsed_url)
+            return current_url, conn, None
+
+        # First attempt: direct download
+        final_url, conn, err = do_request(url, parsed_url)
+        if err is None:
+            return final_url, conn
+
+        if self._proxy_url:
+            if not self._use_proxy:
+                self._use_proxy = True
+                if self._logger: self._logger.print(f"WARNING: Download failed ({err}). Activating proxy for all next downloads.")
+
+            proxy_url = self._build_proxy_url(url)
+            final_url, conn, err = do_request(proxy_url, urlparse(proxy_url))
+
+            if err is None:
+                return final_url, conn
+
+        raise err
 
     def _follow_move(self, conn: '_Connection', queue_id: '_QueueId', url: str, parsed_url: ParseResult) -> Tuple[str, ParseResult]:
         location, redirect_timeout = conn.response_headers.redirect_params(conn.response.status)
@@ -162,6 +185,11 @@ class HttpGateway:
 
     def _process_url(self, url: str) -> str: return _redirect(url, self._url_redirects, self._url_redirects_lock)
     def _process_queue_id(self, queue_id: '_QueueId') -> '_QueueId': return _redirect(queue_id, self._queue_redirects, self._queue_redirects_lock)
+
+    def _build_proxy_url(self, url: str) -> str:
+        if not self._proxy_url:
+            return url
+        return self._proxy_url + url
 
     def _take_connection(self, queue_id: '_QueueId') -> '_Connection':
         with self._connections_lock:
